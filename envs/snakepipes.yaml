@@ -1,0 +1,8 @@
+name: snakepipes
+channels:
+  - mpi-ie
+  - conda-forge
+  - bioconda
+dependencies:
+  - snakePipes=2.7.2
+  

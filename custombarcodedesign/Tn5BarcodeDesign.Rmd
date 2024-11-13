@@ -1,0 +1,226 @@
+---
+title: "Tn5 sample barcode generation"
+output:
+  html_notebook:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+    code_folding: show
+  pdf_document: default
+---
+
+```{r setup, include = FALSE}
+# set root directory for all code chunks
+# knitr::opts_knit$set(root.dir = '/data/manke/processing/hohl/scRNA_analysis/20210923_E12.5/eYFP/')
+
+library(seqinr)
+library(stringr)
+library(sjmisc)
+library(stringdist)
+library(dplyr)
+library(Biostrings)
+library(RColorBrewer)
+library(pheatmap)
+
+options(max.print=1000000)
+set.seed(123)
+```
+
+# Build functions
+
+## GC Content
+
+This function calculates the GC content of a sequence.
+
+```{r}
+GC_Content <- function(sequence) {
+  num_gc <- str_count(sequence, regex("[gc]", ignore_case = T))
+  gc_content <- num_gc / str_length(sequence) * 100
+  return(gc_content)
+}
+```
+
+## GetBarcodes
+
+This is where the magic happens. See code comments.
+
+```{r}
+GetBarcodes <- function(length = 4, gc_min = 50, gc_max = 50, min_dist = 2, method = 'lv', use_barcodes = NULL) {
+  # Barcode generator that uses a couple of prerequisites.
+  # length - length of generated barcodes
+  # gc_min - minimum gc content
+  # gc_max - maximum gc content
+  # min_dist - minimum distance between barcodes
+  # method - method used for determining distance. 'hamming' for hamming, 'lv' for levenshtein (DEFAULT)
+  
+  # Check for length input
+  if(is.na(as.integer(length))) {
+    stop('Please enter an integer as length parameter!')
+  }
+  cat('Build sequences...\n')
+  characters <- c('A', 'C', 'G', 'T')
+  m <- length(characters)^length
+  seq <- characters
+  for(i in 1:(length-1)) { #iterate length-1 times to add a base to all existing sequences
+    seq_new <- NULL
+    for(s in seq) {
+      for(b in characters) {
+        if(i == (length-1)) { # Only check on last loop
+          if(between(GC_Content(paste0(s, b)), gc_min, gc_max) & # check for GC content
+             !str_detect(paste0(s, b), regex('(.)\\1\\1')) & # make sure there are no immediate base pair triplications
+             str_count(paste0(s, b), regex(regex('(.)\\1'))) <= 1 & # make sure there is at maximum one double letter occurrence
+             str_contains(paste0(s, b), characters, logic = "and")) { # check that all bases are represented
+            seq_new <- c(seq_new, paste0(s, b))
+          }
+        } else if(!str_detect(paste0(s, b), regex('(.)\\1\\1')) & # check for no triplications
+                  str_count(paste0(s, b), regex(regex('(.)\\1'))) <= 1) { # make sure there is at maximum one double letter occurrence
+          seq_new <- c(seq_new, paste0(s, b))
+        }
+      }
+    }
+    seq <- seq_new
+  }
+  cat(paste0('Retained ', length(seq), ' barcodes after filtering.\n'))
+  
+  seqs <- DNAStringSet(seq)
+  names(seqs) <- as.character(seqs)
+  
+  seq_return <- DNAStringSet()
+  
+  if(!is.null(use_barcodes)) {
+    cat('Check provided barcodes for filter passing and rc distance...\n')
+    for(i in 1:length(use_barcodes)) {
+      bc <- DNAStringSet(use_barcodes[i])
+      names(bc) <- as.character(bc)
+      own_dist <- stringdist(bc, reverseComplement(bc), method = method)
+      if(!(bc %in% seqs)) {
+        cat(paste0('WARNING: Barcode ', bc, ' not found in filter passing barcodes!\n'))
+        break
+      }
+      if(own_dist < min_dist){
+        cat(paste0('WARNING: The distance of barcode ', bc, ' is less than the minimal distance!\ndist\tmin_dist\n', own_dist, '\t', min_dist, '\n'))
+      }
+      seq_return <- c(seq_return, DNAStringSet(bc))
+      seqs <- seqs[-which(seqs %in% bc)]
+      rc <- reverseComplement(seqs)
+      names(rc) <- paste0(names(seqs), '_rc')
+      seqs_check <- c(seqs, rc)
+      dist <- stringdist(bc, seqs_check, method = method) # determine distances of all other barcodes to starting barcode
+      seqs <- seqs[which((dist[1:length(seqs)] >= min_dist) & (dist[(length(seqs)+1):(2*length(seqs))] >= min_dist))] # remove all barcodes with a distance below the threshold
+    }
+  }
+  cat('Calculate distances and select candidate barcodes...\n')
+  i <- 1
+  
+  while(length(seqs) > 0) { # iterate until the selection list is empty
+    cat(paste0('Run ', i, ' - ', length(seqs), ' Barcodes remaining...\n'))
+    own_dist <- 0
+    sample_idx <- 1:length(seqs)
+    while(own_dist < min_dist & length(sample_idx) != 0) {
+      idx <- sample(x = sample_idx, size = 1) # randomly select starting barcode
+      sample_idx <- sample_idx[-idx]
+      s <- seqs[idx]
+      own_dist <- stringdist(s, reverseComplement(s), method = method)
+    }
+    if(own_dist < min_dist & length(sample_idx) == 0) {
+      break
+    }
+    seq_return <- c(seq_return, s)
+    rc <- reverseComplement(seqs)
+    names(rc) <- paste0(names(seqs), '_rc')
+    seqs_check <- c(seqs, rc)
+    dist <- stringdist(s, seqs_check, method = method) # determine distances of all other barcodes to starting barcode
+    seqs <- seqs[which((dist[1:length(seqs)] >= min_dist) & (dist[(length(seqs)+1):(2*length(seqs))] >= min_dist))] # remove all barcodes with a distance below the threshold
+    i <- i + 1
+  }
+  cat(paste0(length(seq_return), ' barcodes found with a minimal ', method, ' distance of ', min_dist, '.'))
+  return(seq_return)
+}
+```
+
+# Generate barcode list
+
+```{r warning=FALSE}
+laura <- c('TACCGATG')
+all_seqs <- GetBarcodes(length = 8, min_dist = 4, use_barcodes = laura)
+```
+
+# Generate barcode names
+
+```{r}
+bc_names <- NULL
+for(i in 1:length(all_seqs)) {
+  bc_names <- c(bc_names, paste0('MBC_', i))
+}
+names(all_seqs) <- bc_names
+```
+
+# QC of barcode list
+
+```{r, fig.width = 12, fig.height = 9}
+rc <- reverseComplement(all_seqs)
+names(rc) <- paste0(names(all_seqs), '_rc')
+seqs_check <- c(all_seqs, rc)
+
+D <- as.matrix(stringDist(seqs_check, method = 'levenshtein'))
+cols=colorRampPalette(brewer.pal(n=8,name="RdYlGn"))(100)
+pheatmap(D, display_numbers=TRUE, number_format = "%d", number_size = 1, number_color = "black", col=cols)
+```
+
+# Compare with i7 primers
+
+```{r}
+i7 <- read.table(file = '/path/to/i7/primers/i7_2.txt', header = T, sep = '|')
+i7 <- as.data.frame(apply(i7, 2, function(x){if("character" %in% class(x)){str_remove_all(x, ' ')}else{x}}))
+```
+
+```{r}
+i7_bc <- DNAStringSet(i7$index)
+names(i7_bc) <- paste0(i7$prefix, '_', i7$number)
+selected_barcodes <- c('TACCGATG', 'GACGAACT', 'TTGCAGAC', 'GCCTAGAT')
+selected_barcodes <- DNAStringSet(selected_barcodes)
+selected_barcodes <- c(selected_barcodes, reverseComplement(selected_barcodes))
+n_bc <- c('M1', 'M2', 'M3', 'M4')
+names(selected_barcodes) <- c(n_bc, paste0(n_bc, '_rc'))
+```
+
+```{r}
+d <- sapply(X = as.character(selected_barcodes), FUN = function(x) {stringdist(x, c(i7_bc, reverseComplement(i7_bc)), method = 'hamming')})
+colnames(d) <- names(selected_barcodes)
+rownames(d) <- c(names(i7_bc), paste0(names(i7_bc), '_rc'))
+```
+
+```{r}
+d_filtered <- as.data.frame(d) %>% filter_all(any_vars(. %in% 1:2))
+nrow(d_filtered)
+```
+
+```{r, fig.width = 4, fig.height = 10}
+pheatmap(d_filtered, display_numbers=TRUE, number_format = "%d", number_size = 1, number_color = "black", col=cols)
+```
+
+```{r}
+
+```
+
+
+# Save barcodes in fasta format
+
+```{r}
+write.fasta(sequences = as.list(all_seqs),
+            names = bc_names,
+            file.out = '/path/to/save/custom_barcodes.fasta',
+            open = 'w')
+```
+
+```{r}
+writeLines(text = paste(all_seqs, collapse = ' '),
+           '/path/to/save/custom_barcodes.txt')
+```
+
+
+```{r, fig.width = 5, fig.height = 25}
+sessionInfo()
+```
+

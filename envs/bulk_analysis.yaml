@@ -1,0 +1,10 @@
+name: bulk_analysis
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - deeptools=3.5.5
+  - samtools=1.2.1
+  - bedtools=2.30.0
+  - TOBIAS=0.16.1
+  - pygenometracks=3.9

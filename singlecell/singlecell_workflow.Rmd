@@ -1,0 +1,1172 @@
+---
+title: "MUXscATAC and preservation - analysis"
+output:
+  html_notebook:
+    toc: true
+    toc_depth: 2
+    toc_float: true
+    number_sections: true
+    code_folding: show
+  pdf_document: default
+---
+
+```{r setup, include = FALSE}
+
+
+library(tidyverse)
+library(Signac)
+library(GenomeInfoDb)
+library(EnsDb.Hsapiens.v86)
+library(ggplot2)
+library(patchwork)
+library(png)
+library(GenomicRanges)
+library(DT)
+library(gridExtra)
+library(cowplot)
+library(scales)
+
+# Change accordingly
+# source('/path/to/repository/singlecell/functions.R')
+save_dir <- '/path/to/plot/output/folder'
+```
+
+
+```{r}
+# Directory to pull the data for the analysis from
+data.dir <- '/path/to/directory/with/cellranger/outputs' # This should point to the respective folder with the outputs from separate cellranger runs on all samples
+seu <- ReadMultipleSamples.scATAC(data.dir, passed.filters = 1, use_peaks = "/path/to/peakfile/from/ENCODE/sc/data/peaks.bed")
+```
+
+```{r}
+# extract gene annotations from EnsDb
+annotations <- GetGRangesFromEnsDb(ensdb = EnsDb.Hsapiens.v86)
+
+# change annotation style to UCSC since the data was mapped to hg19
+seqlevelsStyle(annotations) <- 'UCSC'
+genome(annotations) <- 'hg38'
+
+Annotation(seu) <- annotations
+
+rm(annotations) # cleanup
+```
+
+```{r}
+CreateOutputDirectory(save_dir)
+```
+
+```{r}
+seu <- ComputeQCMetrics.scATAC(seu = seu)
+```
+
+```{r}
+seu$sample <- colnames(seu) %>% 
+  str_remove(pattern = "_[ACGT]+-1")
+seu$sample <- seu$sample %>% 
+  str_remove(pattern = "^HepG2_")
+
+seu$tagmentation <- seu$sample %>% 
+  str_remove(pattern = "^[A-Za-z]*_[A-Za-z]*_")
+```
+
+# Tn5 hopping assessment
+
+## Check for non-unique barcodes
+
+### Fig. 3c
+
+```{r, fig.width = 4.5, fig.height = 3}
+
+seu$cb_full <- rownames(seu@meta.data)
+seu$cb_seq <- seu$cb_full %>% 
+  str_remove_all(pattern = "^.*_")
+
+t <- table(seu$cb_seq)
+d <- tibble(barcode = names(t), count = t)
+
+p1 <- ggplot(data = d, aes(x = count)) +
+  geom_histogram(aes(y=(after_stat(density))/sum(after_stat(density))),
+                 breaks=seq(0.5,max(d$count)+0.5,1),
+                 alpha=0.9, 
+                 position="identity",
+                 lwd=0.2,
+                 color = "white",
+                 fill = "darkblue") +
+  scale_y_continuous(labels=percent_format()) +
+  scale_x_continuous(breaks = seq(1,max(d$count),1), labels = seq(1,max(d$count),1)) +
+  labs(y = "Fraction of cell barcodes",
+       x = "# samples where\ncell barcode is found") +
+  theme_light() + 
+  theme(panel.grid.minor.x = element_blank(),
+        title = element_text(size = 10))
+p1
+```
+
+```{r}
+ggsave(filename = paste0(save_dir, 'Fig3c_barcodehopping.pdf'),
+       plot = p1,
+       width = 2,
+       height = 3.5)
+```
+
+```{r}
+patterns <- seu$sample %>% 
+  str_remove(pattern = "_[A-Za-z]*$") %>% 
+  unique()
+replacements <- c("Fix_Cryo",
+                  "Fix_Flash",
+                  "Cryo",
+                  "Fresh",
+                  "Flash")
+names(replacements) <- patterns
+
+seu$sample2 <- seu$sample
+seu$sample <- seu$sample2 %>% 
+  str_remove(pattern = "_[A-Za-z]*$") %>% 
+  str_replace_all(replacements)
+seu$sample <- factor(seu$sample, levels = replacements[c(4,3,5,1,2)])
+```
+
+```{r}
+#define sample colors:
+palette <- c("red", "palegreen", "plum", "palegreen4", "plum4")
+names(palette) <- levels(seu$sample)
+palette <- c(palette, "none" = "lightgrey")
+```
+
+
+```{r}
+unique_bc <- d %>% 
+  dplyr::filter(count == 1) %>% 
+  dplyr::pull(barcode)
+  
+seu$unique_bc <- 0
+seu$unique_bc[seu$cb_seq %in% unique_bc] <- 1
+```
+
+
+## Investigate re-appearing barcodes
+
+### Normalize fragment counts by total fragment count per cell barcode
+
+Fragment ratio ($r_cs$) given fragment counts per cell barcode $c$ for a given sample barcode $s$ ($f_{cs}$):
+
+$$r_{cs} = {f_{cs} \over \sum_{s} f_{cs}} $$
+
+$f$ - fragment count
+
+$c$ - cell barcode
+
+$s$ - sample barcode
+
+$r$ - fragment ratio
+
+Sum of fragments for a given cell barcode:
+$$f_{c} = \sum_{s} f_{cs}$$
+
+Fragment ratio:
+$$r_{cs} = {f_{cs} \over f_{c}}$$
+
+The sum of all fragment ratios for a cell barcode needs to be 1:
+
+$$r_c = \sum_{s} r_{cs} = 1$$
+
+```{r}
+total_reads_per_barcode <- seu@meta.data %>% 
+  group_by(cb_seq) %>% 
+  summarize(passed_filters = sum(passed_filters))
+```
+
+```{r}
+seu$fragment_ratio <- seu$passed_filters / total_reads_per_barcode$passed_filters[match(seu$cb_seq, total_reads_per_barcode$cb_seq)]
+
+fr_threshold <- 0.6
+```
+
+
+### Fragment ratio distribution of non-unique barcodes
+
+#### Suppl. Fig. 8a
+
+```{r, fig.width = 4, fig.height = 3}
+p2 <- seu@meta.data %>% 
+  # dplyr::filter(unique_bc == 0) %>%  
+  ggplot(aes(x=fragment_ratio)) + 
+  geom_histogram(breaks=seq(0,1,0.02),
+                 alpha=0.9, 
+                 position="identity",
+                 lwd=0.2,
+                 color = "black",
+                 fill = "darkblue") +
+  geom_vline(xintercept = fr_threshold, linetype = "dashed", linewidth = 1) +
+  scale_x_continuous(breaks = seq(0,1,0.1),
+                     labels = seq(0,1,0.1)) +
+  labs(y = "# cells",
+       x = 'Fragment Ratio') +
+  theme_classic() +
+  # geom_vline(xintercept = cut_RIPr) +
+  theme(plot.title = element_text(hjust=0.5, face="bold"),
+        legend.position = "none")
+p2
+
+ggsave(
+  filename = paste0(save_dir, "SupplFig8a_sc-FR-histo.pdf"),
+  plot = p2,
+  height = 4,
+  width = 3
+)
+```
+
+#### Suppl. Fig. 8b
+
+```{r, fig.height = 5, fig.width = 3}
+p1 <- seu@meta.data %>% 
+  # dplyr::filter(fragment_ratio < 1) %>%
+  ggplot(aes(x=fragment_ratio, y = sample3, fill = sample3)) + 
+    geom_violin() +
+    # geom_smooth(color = 'black') +
+    scale_x_continuous(breaks = seq(0,1,0.2),
+                       labels = seq(0,1,0.2)) +
+    geom_vline(xintercept = fr_threshold, linetype = "dashed", linewidth = 1) +
+    labs(x = "Fragment ratio",
+         y = "") +
+    theme_classic() +
+    # geom_vline(xintercept = cut_RIPr) +
+    theme(plot.title = element_text(hjust=0.5, face="bold"),
+          legend.position = "none",
+          axis.text.y = element_text(vjust = 0.5)) +
+    scale_fill_brewer(palette = "Paired", name = "Sample ID") +
+    scale_y_discrete(limits = rev)
+p1
+
+ggsave(
+  filename = paste0(save_dir, "SupplFig8b_sc-FR-vln-prefilter.pdf"),
+  plot = p1,
+  height = 5,
+  width = 3
+)
+```
+
+#### Fig. 3d
+
+```{r, fig.height = 2, fig.width = 4.5}
+p <- tibble(seu@meta.data) %>% 
+  group_by(cb_seq) %>% 
+  slice_max(fragment_ratio, n = 1) %>% 
+  ungroup() %>% 
+  ggplot(aes(y=fragment_ratio, x = sample3, fill = sample3)) + 
+    geom_violin() +
+    # geom_smooth(color = 'black') +
+    scale_y_continuous(breaks = seq(0,1,0.2),
+                       labels = seq(0,1,0.2)) +
+    geom_hline(yintercept = fr_threshold, linetype = "dashed", linewidth = 1) +
+    labs(y = "Fragment ratio",
+         x = "") +
+    theme_classic() +
+    # geom_vline(xintercept = cut_RIPr) +
+    theme(plot.title = element_text(hjust=0.5, face="bold"),
+          legend.position = "none",
+          axis.text.x = element_text(angle = 90, vjust = 0.5)) +
+    scale_fill_brewer(palette = "Paired", name = "Sample ID")
+p
+```
+
+```{r}
+ggsave(filename = paste0(save_dir, 'fragmentratio_vln.pdf'),
+       plot = p,
+       width = 4.5,
+       height = 2)
+```
+
+
+### Filter using fragment ratio and uniqueness:
+
+```{r}
+md <- tibble(seu@meta.data)
+
+keep <- md %>% 
+  dplyr::filter(fr_threshold <= fragment_ratio) %>% 
+  dplyr::pull(cb_full)
+
+cat("Total barcodes:\t\t\t",
+    length(unique(seu$cb_seq)),
+    "\nUnique barcodes:\t\t",
+    sum(seu$unique_bc),
+    "\nBarcodes shared across samples:\t",
+    length(unique(seu$cb_seq[seu$unique_bc == 0])),
+    "\nShared BCs passing filtering:\t",
+    sum(keep %in% seu$cb_full[seu$unique_bc == 0]),
+    "\nTotal barcodes passing:\t\t",
+    length(keep)
+)
+```
+
+#### Fig. 3e
+
+```{r, fig.width = 3, fig.height = 3}
+counts <- c(length(unique(seu$cb_seq)), sum(seu$unique_bc), length(unique(seu$cb_seq[seu$unique_bc == 0])), sum(keep %in% seu$cb_full[seu$unique_bc == 0]), sum(seu$unique_bc), length(keep))
+what <- c("Total", "Unique", "Shared across samples", "Shared passing filtering", "Unique passing filtering", "Total passing filtering")
+passing <- c("max", 'total', 'total', 'passing\nFR threshold', 'passing\nFR threshold', 'max')
+col <- c('total', 'unique\nto a sample', 'shared\nbetween samples', 'shared\nbetween samples', 'unique\nto a sample', 'total')
+
+d <- tibble(count = counts, descr = what, passing, col)
+d <- d %>% dplyr::filter(passing != 'max')
+d$passing <- factor(d$passing, levels = sort(unique(d$passing))[c(2,1)])
+d$col <- factor(d$col, levels = c('unique\nto a sample', 'shared\nbetween samples'))
+
+p <- ggplot(data = d, aes(y = count, x = passing, fill = col)) +
+  geom_bar(stat = "identity", color = 'black') +
+  labs(y = '# cell barcodes') + 
+  scale_fill_brewer(palette = 'Paired', name = "Barcode") +
+  theme_classic() + 
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+        legend.text = element_text(size = 9, lineheight = 0.7),
+        legend.key.spacing.y = unit(0.05, "in")) 
+p
+```
+
+```{r}
+ggsave(filename = paste0(save_dir, 'Fig3e_barcode-stats.pdf'),
+       plot = p,
+       width = 3,
+       height = 4)
+```
+
+```{r}
+seu_filtered <- subset(seu, subset = cb_full %in% keep & tagmentation == "Omni")
+seu_filtered
+```
+
+# QC
+
+## General QC
+
+```{r}
+# Define filtering cutoff values
+cut_PRFs_low <- 3000 # Reads in peaks lower cutoff
+cut_PRFs_high <- 100000 # Reads in peaks higher cutoff
+cut_RIPr <- 40 # Reads in peaks ratio lower
+cut_BR <- 0.025 # Blacklist fragment ratio higher
+cut_NS_upper <- 4 # Nucleosome signal higher
+cut_NS_lower <- 0.3 # Nucleosome signal higher
+cut_TSSenr <- 2 # TSS enrichment score per cell lower
+```
+
+```{r, fig.width=10, fig.height=10}
+# Plot QC metrics and save plots
+ATAC_QC(seu = seu_filtered,
+        cut_PRFs_low = cut_PRFs_low,
+        cut_PRFs_high = cut_PRFs_high,
+        cut_RIPr = cut_RIPr,
+        cut_BR = cut_BR,
+        cut_NS_upper = cut_NS_upper,
+        cut_NS_lower = cut_NS_lower,
+        cut_TSSenr = cut_TSSenr,
+        legend.position = 'none',
+        palette = palette,
+        manual = T)
+```
+
+## Paper plots
+
+For those plots, the Signac functions `TSSPlot` and `FragmentHistogram` need to be adjusted.
+Use `trace(FragmentHistogram, edit = T)` and copy-paste the following:
+
+```
+function (object, assay = NULL, region = "chr1-1-2000000", group.by = NULL, 
+    cells = NULL, log.scale = FALSE, ...) 
+{
+    cells <- SetIfNull(x = cells, y = colnames(x = object))
+    assay <- SetIfNull(x = assay, y = DefaultAssay(object = object))
+    if (!inherits(x = object[[assay]], what = "ChromatinAssay")) {
+        stop("The requested assay is not a ChromatinAssay.")
+    }
+    reads <- MultiGetReadsInRegion(object = object, assay = assay, 
+        region = region, cells = cells, verbose = FALSE, ...)
+    if (is.null(x = group.by)) {
+        groups <- Idents(object = object)
+    }
+    else {
+        md <- object[[]]
+        groups <- object[[group.by]]
+        groups <- groups[, 1]
+        names(x = groups) <- rownames(x = md)
+    }
+    reads$group <- groups[reads$cell]
+    if (length(x = unique(x = reads$group)) == 1) {
+        p <- ggplot(data = reads, aes(length)) + geom_histogram(bins = 200)
+    }
+    else {
+        p <- ggplot(data = reads, mapping = aes(x = length, fill = group)) + 
+            geom_histogram(bins = 200) + facet_wrap(~group, scales = "free_y", nrow = 1)
+    }
+    p <- p + xlim(c(0, 800)) + theme_classic() + theme(legend.position = "none", 
+        strip.background = element_blank()) + xlab("Fragment length (bp)") + 
+        ylab("Count")
+    if (log.scale) {
+        p <- p + scale_y_log10()
+    }
+    return(p)
+}
+
+```
+
+Then use `trace(TSSPlot, edit = T)` and copy-paste the following:
+```
+function (object, assay = NULL, group.by = NULL, idents = NULL) 
+{
+    assay <- SetIfNull(x = assay, y = DefaultAssay(object = object))
+    if (!inherits(x = object[[assay]], what = "ChromatinAssay")) {
+        stop("The requested assay is not a ChromatinAssay.")
+    }
+    positionEnrichment <- GetAssayData(object = object, assay = assay, 
+        slot = "positionEnrichment")
+    if (!("TSS" %in% names(x = positionEnrichment))) {
+        stop("Position enrichment matrix not present in assay")
+    }
+    enrichment.matrix <- positionEnrichment[["TSS"]]
+    if (nrow(x = enrichment.matrix) == (ncol(x = object) + 2)) {
+        enrichment.matrix <- enrichment.matrix[1:(nrow(x = enrichment.matrix) - 
+            2), ]
+    }
+    obj.groups <- GetGroups(object = object, group.by = group.by, 
+        idents = idents)
+    groupmeans <- ApplyMatrixByGroup(mat = enrichment.matrix, 
+        groups = obj.groups, fun = colMeans, normalize = FALSE)
+    if(is.factor(object@meta.data[,group.by])) {
+        groupmeans$group <- factor(groupmeans$group, levels = levels(seu@meta.data[,group.by]))
+    }
+    p <- ggplot(data = groupmeans, mapping = aes(x = position, 
+        y = norm.value, color = group)) + geom_line(stat = "identity", 
+        size = 0.2) + facet_wrap(facets = ~group, nrow = 1) + xlab("Distance from TSS (bp)") + 
+        ylab(label = "Mean TSS enrichment score") + theme_classic() + 
+        theme(legend.position = "none", strip.background = element_blank()) + 
+        ggtitle("TSS enrichment")
+    return(p)
+}
+```
+
+### Fig. 2c
+
+```{r, fig.width = 8, fig.height = 4}
+metadata <- seu_filtered@meta.data
+
+legend.position = 'right'
+
+  # plot ratio of reads in peaks
+  p1 <- metadata %>% 
+    ggplot(aes(color=sample, x=pct_reads_in_peaks, fill= sample)) + 
+    geom_density(alpha = 0.2) + 
+    theme_classic() +
+    geom_vline(xintercept = cut_RIPr) +
+    theme(plot.title = element_text(hjust=0.5, face="bold"), legend.position = legend.position, axis.title.x = element_blank()) +
+    ggtitle('FRIPs (%)') + scale_fill_manual(values = palette) + scale_color_manual(values = palette)
+  # fragments in peaks
+  p2 <- metadata %>% 
+    ggplot(aes(color=sample, x=peak_region_fragments, fill= sample)) + 
+    geom_density(alpha = 0.2) + 
+    theme_classic() +
+    scale_x_log10() + 
+    geom_vline(xintercept = cut_PRFs_low) +
+    geom_vline(xintercept = cut_PRFs_high) +
+    theme(plot.title = element_text(hjust=0.5, face="bold"), legend.position = legend.position, axis.title.x = element_blank()) +
+    ggtitle('Reads in peaks') + scale_fill_manual(values = palette) + scale_color_manual(values = palette)
+
+  # TSS enrichment score per cell
+  p3 <- metadata %>% 
+    ggplot(aes(color=sample, x=TSS.enrichment, fill= sample)) + 
+    geom_density(alpha = 0.2) + 
+    theme_classic() +
+    scale_x_log10() + 
+    geom_vline(xintercept = cut_TSSenr) +
+    theme(plot.title = element_text(hjust=0.5, face="bold"), legend.position = legend.position, axis.title.x = element_blank()) +
+    ggtitle('TSS enrichment score') + scale_fill_manual(values = palette) + scale_color_manual(values = palette)
+  
+  p4 <- metadata %>% 
+    ggplot(aes(color=sample, x=passed_filters, fill= sample)) + 
+    geom_density(alpha = 0.2) + 
+    theme_classic() +
+    scale_x_log10() + 
+    theme(plot.title = element_text(hjust=0.5, face="bold"), legend.position = legend.position, axis.title.x = element_blank()) +
+    ggtitle('Mapped reads per cell') + scale_fill_manual(values = palette) + scale_color_manual(values = palette)
+  
+  # nucleosome signal score
+  p5 <- metadata %>% 
+    ggplot(aes(color=sample, x=nucleosome_signal, fill= sample)) + 
+    geom_density(alpha = 0.2) + 
+    theme_classic() +
+    scale_x_log10() + 
+    geom_vline(xintercept = cut_NS_upper) +
+    geom_vline(xintercept = cut_NS_lower) +
+    theme(plot.title = element_text(hjust=0.5, face="bold"), legend.position = legend.position, axis.title.x = element_blank()) +
+    ggtitle('Nucleosome signal score') + scale_fill_manual(values = palette) + scale_color_manual(values = palette)
+  # fragment length periodicity
+  histo_ns <- FragmentHistogram(object = seu_filtered, group.by = "sample", region = "chr1-1-2000000")+ ggtitle('DNA fragment sizes') + theme(plot.title = element_text(hjust=0.5, face="bold")) + scale_fill_manual(values = palette)
+  # accessibility signal over all TSS sites
+  TSS_groups <- TSSPlot(seu_filtered, group.by = 'sample') + NoLegend() + ggtitle('Overall TSS accessibility') + theme(plot.title = element_text(hjust=0.5, face="bold")) + scale_color_manual(values = palette)
+  
+design <- '
+  112233
+  445566
+'
+
+p <- p2 + p1 + p3 + p4 + p5 + guide_area() + plot_layout(design = design, guides = 'collect')
+p
+```
+
+```{r}
+ggsave(filename = paste0(save_dir, 'Fig2c_sc-qc.pdf'),
+       plot = p,
+       width = 8,
+       height = 4)
+```
+
+### Suppl. Fig. 4ab
+
+```{r, fig.width = 10, fig.height = 5}
+p <- histo_ns / TSS_groups
+p
+```
+
+```{r}
+ggsave(filename = paste0(save_dir, 'SupplFig4ab_sc-FragHist.pdf'),
+       plot = p,
+       width = 10,
+       height = 5)
+```
+
+
+## Filtering
+
+```{r}
+# Define filtering cutoff values
+cut_PRFs_low <- 3000 # Reads in peaks lower cutoff
+cut_PRFs_high <- 100000 # Reads in peaks higher cutoff
+cut_RIPr <- 40 # Reads in peaks ratio lower
+cut_BR <- 0.025 # Blacklist fragment ratio higher
+cut_NS_upper <- 4 # Nucleosome signal higher
+cut_NS_lower <- 0.1 # Nucleosome signal higher
+cut_TSSenr <- 2 # TSS enrichment score per cell lower
+```
+
+```{r}
+# Filter data using aforementioned cutoff values
+seu_f <- Filter_ATAC_QC(seu = seu_filtered,
+                        cut_PRFs_low = cut_PRFs_low,
+                        cut_PRFs_high = cut_PRFs_high,
+                        cut_RIPr = cut_RIPr,
+                        cut_BR = cut_BR,
+                        cut_NS_upper = cut_NS_upper,
+                        cut_NS_lower = cut_NS_lower,
+                        cut_TSSenr = cut_TSSenr,
+                        min_cells_per_feature = 1)
+```
+
+```{r, fig.width=10, fig.height=10}
+# Plot QC metrics and save plots
+ATAC_QC(seu = seu_f,
+        cut_PRFs_low = cut_PRFs_low,
+        cut_PRFs_high = cut_PRFs_high,
+        cut_RIPr = cut_RIPr,
+        cut_BR = cut_BR,
+        cut_NS_upper = cut_NS_upper,
+        cut_NS_lower = cut_NS_lower,
+        cut_TSSenr = cut_TSSenr,
+        legend.position = 'none',
+        palette = palette,
+        manual = T)
+```
+
+# Dimension reduction
+
+## LSI
+
+```{r}
+seu <- NormLDR(seu = seu_f, plots = NULL)
+```
+
+## UMAP & Clustering
+
+```{r}
+seu <- NonLDR_Clustering(seu = seu, save_plot = NULL, skip_clustering = T, dimplot_group = "sample")
+```
+
+### UMAP plot
+
+#### Fig. 2F
+
+```{r, fig.height = 5, fig.width = 6}
+p <- PlotUMAP(seu, cols = palette, group.by = "sample", legend.position = "right", pt.size = 1, f = 0.4, arrow_thickness = 0.7, title = "HepG2")
+p
+```
+
+```{r}
+ggsave(filename = paste0(save_dir, 'Fig2F_sc-umap.pdf'),
+       plot = p,
+       width = 6,
+       height = 5)
+```
+
+#### Suppl. Fig. 4c
+
+```{r, fig.height = 3, fig.width = 15}
+p <- PlotUMAP(seu, cols = palette, group.by = "sample", legend.position = "right", pt.size = 0.8, f = 0.5, arrow_thickness = 0.3, title = "HepG2", split.by = "sample", coord.tex.size = 2)
+p
+```
+
+```{r}
+ggsave(filename = paste0(save_dir, 'SupplFig4c_sc-umap-split.pdf'),
+       plot = p,
+       width = 15,
+       height = 3)
+```
+
+## LSI plots
+
+### Dimplots
+
+#### Suppl. Fig. 5a
+
+```{r, fig.width = 4, fig.height = 12}
+pt <- 0.2
+pa <- DimPlot(seu, cols = palette, group.by = "sample", pt.size = pt, reduction = "lsi", dims = c(1,2)) + ggtitle('')
+pb <- DimPlot(seu, cols = palette, group.by = "sample", pt.size = pt, reduction = "lsi", dims = c(3,4)) + ggtitle('')
+pc <- DimPlot(seu, cols = palette, group.by = "sample", pt.size = pt, reduction = "lsi", dims = c(5,6)) + ggtitle('')
+pd <- DimPlot(seu, cols = palette, group.by = "sample", pt.size = pt, reduction = "lsi", dims = c(7,8)) + ggtitle('')
+
+design <- '
+  1
+  2
+  3
+  4
+'
+
+p <- pa + pb + pc + pd + plot_layout(design = design, guides = "collect")
+p
+ggsave(filename = paste0(save_dir, 'SupplFig5a_sc-lsi.pdf'),
+       plot = p,
+       width = 4,
+       height = 12)
+```
+
+### LSI loadings and genome tracks
+
+#### Suppl. Fig. 5bc
+
+```{r, fig.width = 10, fig.height = 8}
+p <- VizDimLoadings(seu, dims = 2:3, reduction = "lsi")
+p
+ggsave(filename = paste0(save_dir, 'SupplFig5bc_sc-dimloads-23.pdf'),
+       plot = p,
+       width = 10,
+       height = 8)
+```
+
+#### Suppl. Fig. 5e
+
+```{r, fig.width = 8, fig.height = 12}
+Idents(seu) <- seu$sample
+p <- CoveragePlot(
+  object = seu,
+  region = c("chr19-1747304-1748212", "chr2-215616905-215617822"),
+  extend.upstream = 10000,
+  extend.downstream = 10000,
+  ncol = 1
+) & scale_fill_manual(values = palette)
+p
+
+ggsave(filename = paste0(save_dir, 'SupplFig5e_sc-toploads-IGV-lsi3.pdf'),
+       plot = p,
+       width = 8,
+       height = 12)
+```
+
+#### Suppl. Fig. 5d
+
+```{r, fig.width = 8, fig.height = 12}
+p <- CoveragePlot(
+  object = seu,
+  region = c("chr5-76805713-76806624", "chr14-32010379-32011305"),
+  extend.upstream = 10000,
+  extend.downstream = 10000,
+  ncol = 1
+) & scale_fill_manual(values = palette)
+p
+
+ggsave(filename = paste0(save_dir, 'SupplFig5d_sc-toploads-IGV-lsi2.pdf'),
+       plot = p,
+       width = 8,
+       height = 12)
+```
+
+# Investigate marker regions
+
+## Find DARs
+
+```{r}
+Idents(seu) <- seu$sample
+DARs <- FindAllMarkers(seu, assay = "peaks", only.pos = T, logfc.threshold = 0.25, min.pct = 0.05) %>%
+  dplyr::filter(p_val_adj < 0.01)
+```
+
+## Plot abundance
+
+### Suppl. Fig. 6a
+
+```{r, fig.width = 4, fig.height = 3}
+bp <- tibble(count = table(DARs$cluster), sample = factor(names(table(DARs$cluster)), levels = levels(seu$sample)))
+
+p <- ggplot(bp, mapping = aes(x = sample, y = count, fill = sample)) +
+  geom_bar(stat = "identity", color = 'black') + 
+  scale_fill_manual(values = palette) + 
+  theme_light() +
+  theme(legend.position = "none", axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)) +
+  labs(x = "", y = "# DARs")
+p
+save_dir <- '/data/manke/group/hohl/analyses/241111_MUX-paper/sc/'
+ggsave(filename = paste0(save_dir, 'SupplFig6a_sc-DARsBarPlot.pdf'),
+       plot = p,
+       width = 3,
+       height = 3)
+```
+
+## Peak width distributions
+
+Make GRanges objects for groups:
+
+```{r}
+table(DARs$cluster)
+markers_Flash <- StringToGRanges(regions = DARs %>% dplyr::filter(cluster == "Flash") %>% pull(gene))
+markers_FlashFix <- StringToGRanges(regions = DARs %>% dplyr::filter(cluster == "Fix_Flash") %>% pull(gene))
+markers_Fresh <- StringToGRanges(regions = DARs %>% dplyr::filter(cluster == "Fresh") %>% pull(gene))
+markers_CryoFix <- StringToGRanges(regions = DARs %>% dplyr::filter(cluster == "Fix_Cryo") %>% pull(gene))
+markers_Cryo <- StringToGRanges(regions = DARs %>% dplyr::filter(cluster == "Cryo") %>% pull(gene))
+```
+
+
+Check peak width distribution:
+
+```{r}
+width_cryo <- tibble(group = "Cryo", width = width(markers_Cryo))
+width_cryo_fix <- tibble(group = "Fix_Cryo", width = width(markers_CryoFix))
+width_fresh <- tibble(group = "Fresh", width = width(markers_Fresh))
+width_flash <- tibble(group = "Flash", width = width(markers_Flash))
+width_flash_fix <- tibble(group = "Fix_Flash", width = width(markers_FlashFix))
+width <- rbind(width_fresh, width_cryo, width_flash, width_cryo_fix, width_flash_fix)
+width$group <- factor(width$group, levels = unique(width$group))
+```
+
+###Suppl. Fig. 6b
+
+```{r, fig.width = 5, fig.height = 4}
+p <- ggplot(width, aes(x = width, color = group, fill = group)) +
+  geom_density(alpha = 0.2) +
+  scale_fill_manual(values = palette[-3], name = "cluster")+ 
+  scale_color_manual(values = palette[-3], name = "cluster") + 
+  lims(x = c(400, 1250)) +
+  # facet_wrap(~ group, scales = "free") +
+  # geom_vline(aes(xintercept=mean(width)),color="black", linetype="dashed", size=1) + 
+  theme_bw() + 
+  labs(x = "peak width [bp]",
+       y = "density",
+       title = "Peak size distributions of DARs") + 
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = "right")
+p
+
+ggsave(filename = paste0(save_dir, 'SupplFig6b_sc-DARsSizeDist.pdf'),
+       plot = p,
+       width = 4,
+       height = 3)
+```
+
+# Coverage plots
+
+## Fig. 2b
+
+```{r, fig.width = 8, fig.height = 12}
+Idents(seu) <- seu$sample
+p <- CoveragePlot(
+  object = seu,
+  region = c("ANXA5", "TBP"),
+  extend.upstream = 1000,
+  extend.downstream = 1000,
+  ncol = 1
+) & scale_fill_manual(values = palette)
+p
+```
+
+```{r}
+ggsave(filename = paste0(save_dir, 'Fig2b_sc-ANXA5-TBP.pdf'),
+       plot = p,
+       width = 8,
+       height = 12)
+```
+
+## Suppl. Fig. 6c
+
+```{r, fig.width = 15, fig.height = 15}
+candidates <- DARs %>% 
+  group_by(cluster) %>%
+  dplyr::filter(avg_log2FC > 0.5) %>% 
+  slice_min(order_by = p_val_adj, n = 3, with_ties = F)
+
+p <- CoveragePlot(
+  object = seu,
+  region = paste0(candidates$gene),
+  extend.upstream = 5000,
+  extend.downstream = 5000,
+  ncol = 3
+) & scale_fill_manual(values = palette)
+p
+```
+
+```{r}
+ggsave(filename = paste0(save_dir, 'SupplFig6c_sc-topDARtracks.pdf'),
+       plot = p,
+       width = 15,
+       height = 15)
+```
+
+```{r}
+table(DARs$cluster)
+```
+
+# Peak calling
+
+## Subset for similar cell numbers
+
+```{r}
+Idents(seu) <- seu$sample
+seu_downsampled <- subset(seu, downsample = min(table(seu$sample)[c("Fresh", "Cryo", "Fix_Cryo")]))
+```
+
+## Call peaks
+
+```{r}
+peaks_outdir <- "/data/manke/processing/hohl/20231023_MUX-scATAC-preservation/analysis/data/peaks/"
+filenamer::make_path(x = peaks_outdir)
+peaks_downsampled <- CallPeaks(
+  object = seu_downsampled,
+  group.by = "sample",
+  macs2.path = '/localenv/hohl/anaconda/envs/macs2/bin/macs2',
+  outdir = peaks_outdir,
+  combine.peaks = FALSE
+)
+```
+
+## Upset plots
+
+### Peak overlap
+
+```{r}
+options(bedtools.path = "/localenv/hohl/anaconda/envs/bedtools/bin")
+library(bedtoolsr)
+```
+
+```{r}
+all <- unlist(as(peaks_downsampled, "GRangesList")) %>% reduce
+
+peaks_list <- list()
+for(i in names(peaks_downsampled)) {
+  peaks_list[[i]] <- bt.intersect(b = as_tibble(reduce(peaks_downsampled[[i]])), a = as_tibble(all), u = T) %>%
+    apply(MARGIN = 1, FUN = paste0, collapse = "-") %>%
+    str_remove_all(pattern = " ") %>% 
+    str_remove(pattern = "-[0-9]*-\\*$")
+}
+```
+
+#### Suppl. Fig. 7a
+
+```{r, fig.width = 8, fig.height=3}
+mt <- make_comb_mat(peaks_list)
+p <- UpSet(mt)
+p
+```
+
+```{r}
+pdf(file = paste0(save_dir, 'SupplFig7a_sc-upsetPeaks-all.pdf'),
+    width = 8,
+    height = 3)
+p
+dev.off()
+```
+
+#### Fig. 2D
+
+```{r, fig.width = 3, fig.height=3}
+mt <- make_comb_mat(peaks_list[c("Fresh", "Fix_Cryo")])
+p <- UpSet(mt)
+p
+pdf(file = paste0(save_dir, 'Fig2d1_sc-upsetPeaks-freshvcryofix.pdf'),
+    width = 3,
+    height = 3)
+p
+dev.off()
+mt <- make_comb_mat(peaks_list[c("Fresh", "Cryo")])
+p <- UpSet(mt)
+p
+pdf(file = paste0(save_dir, 'Fig2d2_sc-upsetPeaks-freshvcryo.pdf'),
+    width = 3,
+    height = 3)
+p
+mt <- make_comb_mat(peaks_list[c("Fix_Cryo", "Cryo")])
+p <- UpSet(mt)
+p
+dev.off()
+pdf(file = paste0(save_dir, 'sc_upsetPeaks-cryofixvcryo.pdf'),
+    width = 3,
+    height = 3)
+p
+dev.off()
+```
+
+# Compare peak abundance between conditions
+
+## Use newly called peak set
+
+### Create new assay with new peakset and add to Seurat object
+
+```{r}
+x <- FeatureMatrix(
+  fragments = Fragments(seu),
+  features = all,
+  cells = Cells(seu)
+)
+```
+
+```{r}
+assay <- CreateChromatinAssay(counts = x, fragments = Fragments(seu))
+seu[["called_peaks"]] <- assay
+```
+
+### Create list of seurat objects per sample
+
+```{r}
+seu_list <- list()
+for(i in unique(seu$sample)) {
+  seu_list[[i]] <- subset(seu, subset = sample == i)
+}
+```
+
+### Binarize peak counts and extract fractions with signal per peak and sample
+
+```{r}
+t <- NULL
+
+for(i in names(seu_list)) {
+  sb <- BinarizeCounts(seu_list[[i]], assay = "called_peaks")
+  t <- bind_cols(t, !!i := rowSums(sb@assays$called_peaks@counts)/length(sb$sample))
+}
+t <- bind_cols(peak = rownames(seu@assays$called_peaks@counts), t)
+```
+
+```{r}
+peaks_all <- unlist(peaks_list) %>% unname %>% sort
+tab <- table(peaks_all)
+
+Fresh_peaks <- peaks_list$Fresh[tab[peaks_list$Fresh] == 1]
+Cryo_peaks <- peaks_list$Cryo[tab[peaks_list$Cryo] == 1]
+CryoFix_peaks <- peaks_list$Fix_Cryo[tab[peaks_list$Fix_Cryo] == 1]
+Flash_peaks <- peaks_list$Flash[tab[peaks_list$Flash] == 1]
+FlashFix_peaks <- peaks_list$Fix_Flash[tab[peaks_list$Fix_Flash] == 1]
+```
+
+### Label peaks that are unique to a certain sample
+
+```{r}
+t <- t %>% 
+  add_column(peak_unique_to = NA) %>% 
+  mutate(peak_unique_to = replace_na("none")) %>%
+  mutate(peak_unique_to = replace(peak_unique_to, peak %in% Fresh_peaks, "Fresh")) %>% 
+  mutate(peak_unique_to = replace(peak_unique_to, peak %in% Cryo_peaks, "Cryo")) %>% 
+  mutate(peak_unique_to = replace(peak_unique_to, peak %in% CryoFix_peaks, "Fix_Cryo")) %>% 
+  mutate(peak_unique_to = replace(peak_unique_to, peak %in% Flash_peaks, "Flash")) %>% 
+  mutate(peak_unique_to = replace(peak_unique_to, peak %in% FlashFix_peaks, "Fix_Flash")) %>% 
+  mutate(peak_unique_to = factor(peak_unique_to, levels = c(levels(seu$sample), "none"))) %>%
+  arrange(peak_unique_to) %>% 
+  arrange(desc(row_number()))
+t_important <- t[t$peak_unique_to != "none",]
+t_sampled <- t_important[sample(1:nrow(t_important)),]
+t <- bind_rows(t[t$peak_unique_to == "none",], t_sampled)
+```
+
+### Correlation plots
+
+#### Fig. 2e
+
+```{r, fig.width = 10, fig.height = 3}
+# t_long <- t %>% pivot_longer(!peak, names_to = "sample", values_to = "pct_found")
+p1 <- ggplot(t, aes(x = Fresh, y = Cryo, color = peak_unique_to)) +
+  geom_point(size = 0.01) +
+  geom_abline(slope = 1, intercept = 0, color = "black", linetype = "dashed") +
+  theme_minimal() +
+  # scale_x_log10() +
+  # scale_y_log10() +
+  scale_color_manual(values = palette, name = "Peak unique to") + 
+  guides(colour = guide_legend(override.aes = list(size=2))) +
+  labs(x = "Fresh",
+       y = "Cryo")
+p2 <- ggplot(t, aes(x = Fresh, y = Fix_Cryo, color = peak_unique_to)) +
+  geom_point(size = 0.01) +
+  geom_abline(slope = 1, intercept = 0, color = "black", linetype = "dashed") +
+  theme_minimal() +
+  # scale_x_log10() +
+  # scale_y_log10() +
+  scale_color_manual(values = palette, name = "Peak unique to") + 
+  labs(x = "Fresh",
+       y = "Fix_Cryo") +
+  theme(legend.position = "none")
+p3 <- ggplot(t, aes(x = Fix_Cryo, y = Cryo, color = peak_unique_to)) +
+  geom_point(size = 0.01) +
+  geom_abline(slope = 1, intercept = 0, color = "black", linetype = "dashed") +
+  theme_minimal() +
+  # scale_x_log10() +
+  # scale_y_log10() +
+  scale_color_manual(values = palette, name = "Peak unique to") + 
+  labs(x = "Fix_Cryo",
+       y = "Cryo")+
+  theme(legend.position = "none")
+
+design <- "11223"
+p <- p2 + p1 + guide_area() + plot_layout(design = design, guides = "collect")
+p
+
+ggsave(filename = paste0(save_dir, 'Fig2e_sc-called-peaks-corr.png'),
+       plot = p,
+       width = 7,
+       height = 3)
+```
+
+#### Suppl. Fig. 7b
+
+```{r, fig.width = 8, fig.height = 8}
+# t_long <- t %>% pivot_longer(!peak, names_to = "sample", values_to = "pct_found")
+p1 <- ggplot(t, aes(x = Fresh, y = Cryo, color = peak_unique_to)) +
+  geom_point(size = 0.01) +
+  geom_abline(slope = 1, intercept = 0, color = "black", linetype = "dashed") +
+  theme_minimal() +
+  # scale_x_log10() +
+  # scale_y_log10() +
+  scale_color_manual(values = palette, name = "Peak unique to") + 
+  guides(colour = guide_legend(override.aes = list(size=2))) +
+  labs(x = "Fresh",
+       y = "Cryo")
+p2 <- ggplot(t, aes(x = Fresh, y = Fix_Cryo, color = peak_unique_to)) +
+  geom_point(size = 0.01) +
+  geom_abline(slope = 1, intercept = 0, color = "black", linetype = "dashed") +
+  theme_minimal() +
+  # scale_x_log10() +
+  # scale_y_log10() +
+  scale_color_manual(values = palette, name = "Peak unique to") + 
+  labs(x = "Fresh",
+       y = "Fix_Cryo") +
+  theme(legend.position = "none")
+p3 <- ggplot(t, aes(x = Fresh, y = Flash, color = peak_unique_to)) +
+  geom_point(size = 0.01) +
+  geom_abline(slope = 1, intercept = 0, color = "black", linetype = "dashed") +
+  theme_minimal() +
+  # scale_x_log10() +
+  # scale_y_log10() +
+  scale_color_manual(values = palette, name = "Peak unique to") + 
+  labs(x = "Fresh",
+       y = "Flash")+
+  theme(legend.position = "none")
+p4 <- ggplot(t, aes(x = Fresh, y = Fix_Flash, color = peak_unique_to)) +
+  geom_point(size = 0.01) +
+  geom_abline(slope = 1, intercept = 0, color = "black", linetype = "dashed") +
+  theme_minimal() +
+  # scale_x_log10() +
+  # scale_y_log10() +
+  scale_color_manual(values = palette, name = "Peak unique to") + 
+  labs(x = "Fresh",
+       y = "Fix_Flash")+
+  theme(legend.position = "none")
+p5 <- ggplot(t, aes(x = Cryo, y = Fix_Cryo, color = peak_unique_to)) +
+  geom_point(size = 0.01) +
+  geom_abline(slope = 1, intercept = 0, color = "black", linetype = "dashed") +
+  theme_minimal() +
+  # scale_x_log10() +
+  # scale_y_log10() +
+  scale_color_manual(values = palette, name = "Peak unique to") + 
+  labs(x = "Cryo",
+       y = "Fix_Cryo")+
+  theme(legend.position = "none")
+p6 <- ggplot(t, aes(x = Cryo, y = Flash, color = peak_unique_to)) +
+  geom_point(size = 0.01) +
+  geom_abline(slope = 1, intercept = 0, color = "black", linetype = "dashed") +
+  theme_minimal() +
+  # scale_x_log10() +
+  # scale_y_log10() +
+  scale_color_manual(values = palette, name = "Peak unique to") + 
+  labs(x = "Cryo",
+       y = "Flash")+
+  theme(legend.position = "none")
+p7 <- ggplot(t, aes(x = Cryo, y = Fix_Flash, color = peak_unique_to)) +
+  geom_point(size = 0.01) +
+  geom_abline(slope = 1, intercept = 0, color = "black", linetype = "dashed") +
+  theme_minimal() +
+  # scale_x_log10() +
+  # scale_y_log10() +
+  scale_color_manual(values = palette, name = "Peak unique to") + 
+  labs(x = "Cryo",
+       y = "Fix_Flash")+
+  theme(legend.position = "none")
+p8 <- ggplot(t, aes(x = Fix_Cryo, y = Flash, color = peak_unique_to)) +
+  geom_point(size = 0.01) +
+  geom_abline(slope = 1, intercept = 0, color = "black", linetype = "dashed") +
+  theme_minimal() +
+  # scale_x_log10() +
+  # scale_y_log10() +
+  scale_color_manual(values = palette, name = "Peak unique to") + 
+  labs(x = "Fix_Cryo",
+       y = "Flash")+
+  theme(legend.position = "none")
+p9 <- ggplot(t, aes(x = Fix_Cryo, y = Fix_Flash, color = peak_unique_to)) +
+  geom_point(size = 0.01) +
+  geom_abline(slope = 1, intercept = 0, color = "black", linetype = "dashed") +
+  theme_minimal() +
+  # scale_x_log10() +
+  # scale_y_log10() +
+  scale_color_manual(values = palette, name = "Peak unique to") + 
+  labs(x = "Fix_Cryo",
+       y = "Fix_Flash")+
+  theme(legend.position = "none")
+p10 <- ggplot(t, aes(x = Flash, y = Fix_Flash, color = peak_unique_to)) +
+  geom_point(size = 0.01) +
+  geom_abline(slope = 1, intercept = 0, color = "black", linetype = "dashed") +
+  theme_minimal() +
+  # scale_x_log10() +
+  # scale_y_log10() +
+  scale_color_manual(values = palette, name = "Peak unique to") + 
+  labs(x = "Flash",
+       y = "Fix_Flash")+
+  theme(legend.position = "none")
+
+design <- "
+  A#KK
+  BEKK
+  CFH#
+  DGIJ
+"
+p <- p1 + p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9 + p10 + guide_area() + plot_layout(design = design, guides = "collect")
+p
+
+ggsave(filename = paste0(save_dir, 'SupplFig7b_sc-called-peaks-corr-all.pdf'),
+       plot = p,
+       width = 8,
+       height = 8)
+ggsave(filename = paste0(save_dir, 'SupplFig7b_sc-called-peaks-corr-all.png'),
+       plot = p,
+       width = 8,
+       height = 8)
+```
+
+
+# Session info
+
+```{r, fig.width = 8, fig.height=3}
+sessionInfo()
+```

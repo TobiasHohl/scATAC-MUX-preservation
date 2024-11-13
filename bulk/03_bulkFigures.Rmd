@@ -1,0 +1,444 @@
+---
+title: "HepG2 MUX-bulkATAC preservation analysis"
+output:
+  html_notebook:
+    toc: true
+    toc_depth: 2
+    toc_float: true
+    number_sections: true
+    code_folding: show
+  pdf_document: default
+---
+
+```{r setup, include = FALSE}
+options(max.print=1000000)
+set.seed(123)
+
+path_to_repo <- "/path/to/repo" # set
+wd <- "/path/to/data" # set
+save_dir <- paste0(wd, "/outs/Rplots/")
+
+# Install necessary packages
+source(paste0(path_to_repo, "/envs/R_packages_bulk.R"))
+
+library(tidyverse)
+library(ggstar)
+library(UpSetR)
+library(reshape2)
+```
+
+# Fig 1
+
+## b - Mitochondrial content
+
+```{r}
+data.dir <- paste0(wd, "/outs/idxstats")
+
+files <- list.files(path = data.dir)
+txt <- grep(pattern = '\\.txt$', x = files)
+
+dat <- NULL
+
+d <- NULL
+depth <- NULL
+for(i in txt) {
+  x <- read_tsv(paste0(data.dir, files[i]), col_names = F)
+  r <- x[,3]/sum(x[,3])
+  depth <- c(depth, sum(x[,3]))
+  n <- c(sum(r[1:22,]), r[23,], r[24,], r[25,], sum(r[26:195,]))
+  if(is.null(d)) {
+    # d <- r
+    d <- n
+  } else {
+    # d -< cbind(d, r)
+    d <- cbind(d, n)
+  }
+  
+}
+
+depth <- tibble(reads = depth, sample = str_remove(files[txt], '.txt'))
+
+# d <- d/rowMeans(d)
+d_norm <- d/rowMeans(d)
+# d <- d[-nrow(d),]
+col <- c('autosome', 'Mito', 'chrX', 'chrY', 'GL/KI')
+
+for(i in 1:length(txt)) {
+  r <- log2(d_norm[,i])
+  p <- d[,i]*100
+  s <- rep(str_remove(files[txt[i]], '.txt'), length(col))
+  
+  if(is.null(dat)) {
+    s1 <- r
+  }
+  
+  dat <- rbind(dat, cbind(r, p, s, col))
+  
+}
+
+colnames(dat) <- c('log2(sample_r/mean_r)', 'percent_reads', 'sample', 'region')
+dat <- as_tibble(dat)
+dat <- type_convert(dat)
+
+p_dat <- dat[which(!(dat$region == 'autosome')),]
+# p_dat <- dat
+p_dat$sample <- str_remove_all(p_dat$sample, pattern = '.filtered')
+fac <- c("ENCODE", "cryo_0.1FA", "cryo_0.5FA", "cryo_1.0FA", "cryo_5.0FA", "flash_0.1FA", "flash_0.5FA", "flash_1.0FA", "flash_5.0FA")
+p_dat$sample <- factor(x = p_dat$sample, levels = fac)
+```
+
+```{r, fig.width = 5, fig.height = 3.5}
+mito <- p_dat[p_dat$region=='Mito',]
+mito <- mito[mito$sample != 'ENCODE',]
+ref_value <- p_dat$percent_reads[p_dat$sample=='ENCODE' & p_dat$region=='Mito']
+mito$FA <- factor(str_remove(str_remove(mito$sample, pattern = '^.*_'), pattern = 'FA'), levels = unique(str_remove(str_remove(fac[-1], pattern = '^.*_'), pattern = 'FA')))
+mito$prep <- factor(str_remove(mito$sample, pattern = '_.*$'), levels = unique(str_remove(fac[-1], pattern = '_.*$')))
+mito$prep <- str_replace(mito$prep, "cryo", "cryopreserved")
+mito$prep <- str_replace(mito$prep, "flash", "flash frozen")
+
+p <- ggplot(mito, aes(x = FA, y = percent_reads, fill = prep)) +
+  geom_bar(stat = 'identity', color = 'black', position = position_dodge()) + 
+  scale_fill_manual(values = c("palegreen4", "plum3")) +
+  geom_hline(aes(yintercept = ref_value, linetype = 'ENCODE reference'), col = 'red3', size = 1) +
+  scale_linetype_manual(name = '', values = 'longdash') +
+  guides(fill=guide_legend(title="Preparation")) + 
+  labs(x = 'Formaldehyde concentration [%]', y = 'Mitochondrial reads [%]', title = 'Mitochondrial read content') +
+  theme_minimal() +
+  theme(plot.title = element_text(face = 'bold', hjust = 0.5, size = 16))
+p
+```
+
+```{r}
+ggsave(filename = paste0(save_dir, 'mito-content.pdf'),
+       plot = p,
+       width = 5,
+       height = 3.5)
+```
+
+## c - FRIPS
+
+```{r}
+data.dir <- paste0(wd, "/outs/plotEnrichment")
+mtx <- read_delim(file = paste0(data.dir, 'values.tsv'), delim = '\t')
+```
+
+```{r}
+frips <- mtx[mtx$featureType == "ENCODE_peaks" & mtx$file != "ref",]
+frips$percent <- as.numeric(frips$percent)
+frips$FA <- str_remove(str_remove(frips$file, "FA$"), "^.*_")
+ref_value <- as.numeric(mtx$percent[mtx$file == "ENCODE" & mtx$featureType == "ENCODE_peaks"])
+frips$prep <- factor(str_remove(frips$file, pattern = '_.*$'), levels = unique(str_remove(frips$file, pattern = '_.*$')))
+frips$prep <- str_replace(frips$prep, "cryo", "cryopreserved")
+frips$prep <- str_replace(frips$prep, "flash", "flash frozen")
+```
+
+```{r, fig.width = 5, fig.height = 3.5}
+p <- ggplot(frips, aes(x = FA, y = percent, fill = prep)) +
+  geom_bar(stat = 'identity', color = 'black', position = position_dodge())  +
+  scale_fill_manual(values = c("palegreen4", "plum3")) +
+  geom_hline(aes(yintercept = ref_value, linetype = 'ENCODE reference'), col = 'red3', size = 1) +
+  scale_linetype_manual(name = '', values = 'longdash') +
+  guides(fill=guide_legend(title="Preparation")) +
+  labs(x = 'Formaldehyde concentration [%]', y = 'FRIPS [%]', title = 'Signal enrichment\nin reference peaks') +
+  theme_minimal() +
+  theme(plot.title = element_text(face = 'bold', hjust = 0.5, size = 16))
+p
+```
+
+```{r}
+ggsave(filename = paste0(save_dir, 'frips.pdf'),
+       plot = p,
+       width = 5,
+       height = 3.5)
+```
+
+
+## d - Correlation
+
+```{r}
+mtx <- as.matrix(read.table(
+  file = paste0(wd, '/outs/plotCorrelation/plotCorrelation_all_pearson.tab'),
+  sep = "\t",
+  header = T,
+  row.names = 1
+))
+
+colnames(mtx) <- colnames(mtx) %>% str_replace(., pattern = "^([a-z]+)_([015]\\.[015])", replacement = "\\2_\\1")
+rownames(mtx) <- rownames(mtx) %>% str_replace(., pattern = "^([a-z]+)_([015]\\.[015])", replacement = "\\2_\\1")
+
+lv <- c("ENCODE", "0.1_cryo", "0.5_cryo", "1.0_cryo", "5.0_cryo",
+        "0.1_flash", "0.5_flash", "1.0_flash", "5.0_flash", "fresh")
+
+m <- mtx[, order(factor(colnames(mtx), levels = lv))]
+
+m <- m[order(factor(colnames(mtx), levels = lv)), ]
+m <- m[-10,-10]
+
+m[upper.tri(m)]<- NA
+
+# Melt the correlation matrix
+melted <- as_tibble(melt(m, na.rm = TRUE))
+melted$Var1 <- factor(melted$Var1, levels = rev(lv))
+melted$Var2 <- factor(melted$Var2, levels = lv)
+melted$val.format <- format(melted$value, digits = 2, nsmall = 2)
+# Heatmap
+p <- ggplot(data = melted, aes(Var2, Var1, fill = value))+
+ geom_tile(color = "white")+
+  geom_text(aes(label = val.format), size = 3) +
+ scale_fill_gradient(low = "white", high = "red", 
+    limit = c(0.5,1), space = "Lab", 
+   name="Pearson\nCorrelation") +
+  theme_void()+ 
+ theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+    size = 12, hjust = 1),
+    axis.text.y = element_text(vjust = 0.5, 
+    size = 12, hjust = 1))+
+  labs(x = "", y = "") +
+ coord_fixed()
+p
+```
+
+```{r}
+ggsave(filename = paste0(save_dir, 'Corr.pdf'),
+       plot = p,
+       width = 7,
+       height = 5)
+```
+
+# Suppl. Fig. 2
+## a - Fragment size distributions
+
+```{r}
+data.dir <- paste0(wd, '/outs/bamPEFragmentSize/')
+mtx <- read_delim(file = paste0(data.dir, 'values.tsv'), delim = '\t', skip = 1) # read deeptools output, skip first line because of comment (@)
+```
+
+```{r}
+max_bp <- 800 #maximum length for plot and analysis
+bp <- 3 # start of summary values, center of first bin
+```
+
+```{r}
+# data manipulation
+# first, summarize each bin
+step_size <- bp * 2 - 1
+Sample <- NULL
+Size <- NULL
+Occurrence <- NULL
+while(bp < max_bp) {
+  for(i in unique(mtx$Sample)) {
+    Occurrence <- c(Occurrence, sum(mtx$Occurrences[mtx$Sample == i & ((bp - ((step_size - 1)/2)) <= mtx$Size & mtx$Size <= (bp + ((step_size - 1)/2)))]))
+    Size <- c(Size, bp)
+    Sample <- c(Sample, i)
+  }
+  bp <- bp + step_size
+}
+# create tibble and add percentage measure for better comparison
+dat <- tibble(Sample, Size, Occurrence)
+dat$pct <- 0
+for(i in 1:nrow(dat)) {
+  s <- sum(dat$Occurrence[dat$Sample == dat$Sample[i]])
+  dat$pct[i] <- dat$Occurrence[i]*100/s
+}
+# add reference data in separate column
+ref <- dat[dat$Sample == 'ENCODE',]
+dat <- dat[dat$Sample != 'ENCODE',]
+dat <- arrange(dat, Sample, Size)
+dat$ref <- rep(ref$pct, length(unique(dat$Sample)))
+# modify a couple of metadata information for plotting
+dat$FA <- str_remove(str_remove(dat$Sample, pattern = 'FA'), pattern = '^.*_')
+dat$prep <- str_remove(dat$Sample, pattern = '_.*$')
+dat$preservation <- str_remove(dat$prep, pattern = '^.*-')
+dat$preservation <- str_replace(str_replace(dat$preservation, pattern = 'cryo', replacement = 'cryopreserved'), pattern = 'flash', replacement = 'flash frozen')
+```
+
+```{r, fig.width = 4.5, fig.height = 8}
+p <- ggplot(data = dat, aes(x = Size, y = pct)) +
+  geom_line(aes(y = ref, color = 'ENCODE reference')) +
+  # geom_area(aes(y = ref), fill = alpha('darkred', alpha = 0.4)) +
+  geom_line(aes(color = 'data')) +
+  geom_area(fill = alpha('darkblue', alpha = 0.3)) +
+  geom_area(aes(y = ref), fill = alpha('darkred', alpha = 0.3)) +
+  # geom_bar(stat = 'identity', fill = alpha('darkblue', alpha = 0.7)) +
+  scale_color_manual(name = '', values = c('ENCODE reference' = 'darkred', 'data' = 'darkblue')) +
+  facet_grid(FA ~ preservation, labeller = 
+              labeller(
+                 preservation = ~ paste0(.),
+                 FA = ~ paste0(., "% FA"),
+                 .multi_line = F
+              ),
+             # strip.position = 'both',
+             # ncol = 4
+  ) +
+  xlim(c(0,800)) +
+  labs(x = 'Size [bp]', y = '% fragments', title = "Fragment size distributions\ncompared to ENCODE reference") +
+  theme_minimal() +
+  theme(strip.text = element_text(size = 7.5, face = 'bold'),
+        plot.title = element_text(hjust = 0.5, face = 'bold', size = 15),
+        legend.position = 'bottom',
+        strip.background = element_rect(fill = 'grey90', color = 'white'))
+p
+```
+## Save plot
+```{r}
+ggsave(filename = paste0(save_dir, 'fragment_hist.pdf'),
+       plot = p,
+       width = 4.5,
+       height = 8)
+```
+
+
+## b - PCA
+
+```{r}
+data.dir <- paste0(wd, '/outs/plotPCA/')
+mtx <- read_delim(file = paste0(data.dir, 'values_all.tsv'), delim = '\t', skip = 1)
+```
+
+```{r}
+mtx$Component <- paste0("PC_", mtx$Component)
+pca <- mtx %>%
+  pivot_longer(!Component, names_to = "Sample", values_to = "value") %>%
+  pivot_wider(names_from = Component, values_from = value)
+pca$Sample <- str_replace(pca$Sample, "ENCODE", "ENCODE reference_0.0FA")
+pca$FA <- str_remove(str_remove(pca$Sample, "FA"), "^.*_")
+pca$prep <- str_remove(pca$Sample, pattern = '_.*$')
+pca$prep <- str_replace(pca$prep, "cryo", "cryopreserved")
+pca$prep <- str_replace(pca$prep, "flash", "flash frozen")
+pca_eigen <- pca[(pca$Sample %in% c("Eigenvalue")),]
+pca <- pca[!(pca$Sample %in% c("Eigenvalue")),]
+pca$prep <- factor(pca$prep, levels = sort(unique(pca$prep))[c(2,1,3)])
+```
+
+```{r}
+ev <- select(pca_eigen, -FA, -prep, -Sample) %>% pivot_longer(cols = everything(), names_to = "PC")
+ev$PC <- as.numeric(str_remove(ev$PC, "PC_"))
+ev$pct <- 0
+for(i in 1:length(ev$PC)) {
+  ev$pct[i] <- ev$value[i]/sum(ev$value)
+}
+pc1 <- ev$pct[ev$PC == 1]
+pc2 <- ev$pct[ev$PC == 2]
+```
+
+
+```{r, fig.width = 7, fig.height = 5}
+p <- ggplot(data = pca, mapping = aes(x = PC_1, y = PC_2, starshape = prep, fill = FA)) +
+  geom_star(size = 5) + 
+  scale_starshape_manual(name = 'Preparation', values = c(1,13, 23)) +
+  scale_fill_brewer(palette = 'Greys') +
+  labs(x = paste0('PC1 (', format(pc1*100, digits = 2, nsmall = 1), '% of variance explained)'),
+       y = paste0('PC2 (', format(pc2*100, digits = 2, nsmall = 1), '% of variance explained)'),
+       title = "Principal Component Analysis") +
+  guides(fill = guide_legend(override.aes=list(starshape = 15),
+                             title = 'Formaldehyde [%]')) +
+  theme_light() +
+  theme(legend.position = 'right',
+        plot.title = element_text(face = "bold", size = 20, hjust = 0.5))
+p
+```
+
+```{r}
+ggsave(filename = paste0(save_dir, 'PCA.pdf'),
+       plot = p,
+       width = 7,
+       height = 5)
+```
+
+
+
+## c - Peaks
+
+```{r}
+filepath <- paste0(wd, "/outs/comparePeaksets/")
+files <- list.files(filepath, pattern = ".bed")
+files <- files[c(4,6)]
+l <- list()
+
+for (i in files) {
+  n <- str_remove(i, '.bed')
+  l[[n]] <- readLines(paste0(filepath, i))
+}
+names(l) <- c("0.1_cryo peaks", "ENCODE peaks")
+```
+
+```{r, fig.width = 5, figh.height = 4}
+p <- upset(fromList(l), order.by = 'freq', mainbar.y.label = "Peak Intersections", sets.x.label = "Peaks per sample")
+p
+```
+
+```{r}
+pdf(file = paste0(save_dir, 'peaks.pdf'),
+    width = 5,
+    height = 4)
+p
+dev.off()
+```
+
+# Suppl. Fig. 3 - TF footprints
+
+```{r, fig.width = 12, fig.height = 6}
+files <- c(
+  paste0(wd, "/outs/TOBIAS/PlotAggregate/CEBPB_MA0466.1.txt"),
+  paste0(wd, "/outs/TOBIAS/PlotAggregate/CTCF_MA0139.1.txt"),
+  paste0(wd, "/outs/TOBIAS/PlotAggregate/GABPA_MA0062.1.txt"),
+  paste0(wd, "/outs/TOBIAS/PlotAggregate/MAXMYC_MA0059.1.txt"),
+  paste0(wd, "/outs/TOBIAS/PlotAggregate/REST_MA0138.1.txt")
+)
+
+
+d <- read_delim(files, skip = 2, delim = "\t", col_names = c("sample", "Motif", "values"))
+
+d$motif_lim <- c(
+  rep(5.5, 10),
+  rep(9.5, 10),
+  rep(5, 10),
+  rep(5.5, 10),
+  rep(9.5, 10)
+)
+
+d <- d %>% separate_rows(values, sep = ",")
+d$bp <- seq(-60, 59, 1) %>% rep(., 50)
+d$values <- d$values %>% as.numeric()
+d$sample <- d$sample %>% 
+  str_remove(pattern = "_corrected") %>% 
+  str_replace(pattern = "-", replacement = "_") %>% 
+  str_replace(pattern = "ref", replacement = "ENCODE") %>% 
+  str_replace(pattern = "^([a-z]+)_([015]\\.[015])", replacement = "\\2_\\1") %>% 
+  factor(., levels = lv)
+d$Motif <- d$Motif %>%
+  str_remove_all(pattern = "^.*\\.1\\.|_.*$") %>% 
+  factor(., levels = unique(.))
+d <- d %>% filter(sample != "fresh")
+
+pal <- c("red", rep("green3", 4), rep("purple2", 4))
+names(pal) <- lv[-10]
+
+p <- ggplot(data = d, aes(x = bp, y = values, color = sample)) +
+  geom_line() + 
+  facet_grid(Motif ~ sample, switch = "y") +
+  scale_color_manual(values = pal) +
+  geom_vline(data = plyr::ddply(d, "Motif", summarize, wavg = mean(motif_lim)), aes(xintercept=wavg), linetype = "dotted", linewidth = 0.2) +
+  geom_vline(data = plyr::ddply(d, "Motif", summarize, wavg = -mean(motif_lim)), aes(xintercept=wavg), linetype = "dotted", linewidth = 0.2) +
+  scale_x_continuous(breaks = c(-40, 0, 40)) +
+  scale_y_continuous(breaks = c(-0.1, 0, 0.1), position = "right") +
+  theme_minimal() +
+  theme(strip.text = element_text(size = 9, face = 'bold'),
+        legend.position = 'none',
+        strip.background = element_rect(fill = 'grey90', color = 'white')) +
+  labs(x = "bp from motif center",
+       y = "Aggregated signal")
+p
+ggsave(filename = paste0(save_dir, 'TF-footprint.pdf'),
+       plot = p,
+       width = 12,
+       height = 6)
+```
+
+
+# Session Info
+
+```{r}
+sessionInfo()
+```
+
