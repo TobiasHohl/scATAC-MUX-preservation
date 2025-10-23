@@ -1,19 +1,23 @@
 # Enhancing single-cell ATAC sequencing with formaldehyde fixation, cryopreservation, and multiplexing for flexible analysis
 
-Tobias Hohl<sup>1,2</sup>, Ulrike Boenisch<sup>1</sup>, Thomas Manke<sup>1</sup>, Laura Arrigoni<sup>1</sup>
+Tobias Hohl<sup>1,2</sup>, Ulrike Boenisch<sup>1</sup>, Thomas Manke<sup>1,3</sup>, Laura Arrigoni<sup>1</sup>
 
-- <sup>1</sup> Max-Planck-Institute of Immunobiology and Epigenetics, Freiburg
+- <sup>1</sup> Max-Planck-Institute of Immunobiology and Epigenetics, Freiburg, Germany
 
-- <sup>2</sup> Faculty of Biology, Freiburg University, Freiburg
+- <sup>2</sup> Faculty of Biology, Albert-Ludwigs-Universität Freiburg, Freiburg, Germany
+- <sup>3</sup> School of Computing, Communication and Business, HTW Berlin, Berlin, Germany
 
-This paper has been submitted for publication in *Some Journal*.
+This paper has been published in [BMC Research Notes](https://link.springer.com/article/10.1186/s13104-025-07547-y).
 
-> The paper showcases that integrating formaldehyde fixation with cryopreservation in microfluidics-based single-cell ATAC-seq experiments produces results comparable to those from fresh samples. We provide a multiplexed scATAC-seq workflow that allows for flexible sample collection, enabling time-course experiments to be processed within a single 10x scATAC-seq reaction. This method eliminates batch effects arising from different sampling and library preparation experiments due to streamlined preservation and parallel processing.
-
+If you use parts or the entirety of the analyses available in this repository, please cite the main publication:
+> Hohl, T., Bönisch, U., Manke, T., Arrigoni, L. Enhancing single-cell ATAC sequencing with formaldehyde fixation, cryopreservation, and multiplexing for flexible analysis. BMC Res Notes 18, 437 (2025). https://doi.org/10.1186/s13104-025-07547-y
 
 ## Abstract
 
-> The assay for transposase-accessible chromatin using sequencing (ATAC-seq) revolutionized the field of epigenetics since its emergence by providing a means to uncover chromatin dynamics and other factors affecting gene expression. The development of single-cell (sc) applications in recent years led to an even deeper understanding of cell type specific gene regulatory mechanisms. One of the major challenges while running ATAC-seq experiments, bulk or sc, is the need for freshly collected cells for successful experiments. While various freezing methods have already been tested and established for bulk and sc ATAC-seq, quality metrics for preserved cells are rather poor or dependent on sampling time when compared to fresh samples. This makes it difficult to conduct all sorts of complex experiments i.e. with multiple conditions, patients, or time course studies. Especially, accounting for batch effects can be difficult if samples need to be processed at different time points of collection. We tackled this issue by adding a fixation step prior to the freezing method. The additional fixation step improved library quality and yield data comparable to fresh samples. The workflow was also tested on multiplexed sc ATAC experiments, set-up for cost-efficient low input sample handling. Sample cross-in, typically encountered in Tn5-based multiplex approaches, were tackled with a computational procedure specifically developed for this approach.
+> ### Objective
+> The need for freshly isolated cells in bulk or single cell ATAC-seq experiments creates considerable logistical barriers and increases susceptibility to batch effects. This makes it difficult to coordinate complex or longitudinal studies. Our goal was to develop a sample preservation strategy that overcomes these limitations, enabling consistent and high-quality chromatin accessibility profiling from archived samples.
+> ### Results
+> We established a workflow that incorporates mild formaldehyde fixation prior to cryopreservation, preserving both bulk and single-cell ATAC-seq data quality at levels comparable to fresh samples in HepG2 cells. This protocol reliably maintains key data quality metrics, including signal-to-noise ratio and fragment distributions. Furthermore, the method is fully compatible with transposase-based sample multiplexing using custom Tn5 barcodes. To address barcode hopping inherent to multiplexing, we introduced a computational demultiplexing strategy based on fragment ratios, which accurately assigns single cells to their sample of origin. Our approach streamlines experimental logistics and ensures reproducibility across diverse and temporally dispersed samples, broadening the scope for ATAC-seq–based studies, including those in clinical research settings where coordinated sample collection is challenging.
 
 
 
@@ -41,7 +45,7 @@ or [download a zip archive](https://github.com/TobiasHohl/scATAC-MUX-preservatio
 
 All dependencies (conda environments + R packages needed) are listed in the `envs` folder.
 
-You'll need working conda and R (>=4.3) installation and you'll need to install the dependencies to run the code. This is marked in the respective `.md` files.
+You'll need working conda and R (>=4.3) installations and you'll need to install the dependencies to run the code. This is marked in the respective `.md` files.
 
 
 ## Reproducing the results
